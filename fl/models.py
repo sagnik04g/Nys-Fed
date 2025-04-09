@@ -16,7 +16,6 @@ import torchvision.transforms as transforms
 from sklearn.metrics import accuracy_score, precision_score, recall_score, matthews_corrcoef, f1_score, roc_auc_score, confusion_matrix
 from fl.nsgd import NSGD
 from fl.fed_admm import ADMM
-from utils import MemoryMonitor
 
 # GPU
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -26,7 +25,7 @@ device = 'cuda' if torch.cuda.is_available() else 'cpu'
 metrics_with_avg = {'prec' : precision_score, 'recl' : recall_score, 'f1' : f1_score}
 avg = 'macro'
 current_time = time.time()
-memory_info=None
+memory_info=0
 # metrics that dont require average parameter
 metrics_no_avg = {'accu' : accuracy_score, 'mcc' : matthews_corrcoef}
 
@@ -309,7 +308,6 @@ def model_train_second_order(model: torch.nn.Module, y_k: torch.Tensor, data_loa
     model.train()
     optim = model.optim(model.parameters(), lr = model.lr)
     hessian_sketch = None
-    memory_monitor = MemoryMonitor()
     # for stochastic update
     random_batch = random.randint(0, len(data_loader)-1)
     process = psutil.Process()
@@ -369,7 +367,7 @@ def model_train_second_order(model: torch.nn.Module, y_k: torch.Tensor, data_loa
             optim.step()
             break
     
-    memory_info=mem_info.rss/(1024*1024) ## store in MB
+    memory_info = (mem_info.rss/(1024*1024)) ## store in MB
     # stability
     for p in model.parameters():
         torch.nan_to_num_(p.data, nan=1e-9, posinf=1e-9, neginf=1e-9)
@@ -633,7 +631,7 @@ def cal_metrics(labels: torch.Tensor, preds: torch.Tensor, wandb_log: dict[str, 
         metrics_no_avg = {'accu' : accuracy_score, 'mcc' : matthews_corrcoef, 'time' : (time.time() - current_time), 'memory_uasge': memory_info}
         # accuracy and mcc
         for metric_name, metric_func in metrics_no_avg.items():
-            if(metric_name=='time'):
+            if(metric_name=='time' or metric_name=='memory_usage'):
                 metric = metric_func
             else:
                 metric = metric_func(labels, preds)
@@ -656,10 +654,10 @@ def cal_metrics(labels: torch.Tensor, preds: torch.Tensor, wandb_log: dict[str, 
         
         # get class prediction
         preds = preds.round()
-        metrics_no_avg = {'accu' : accuracy_score, 'mcc' : matthews_corrcoef, 'time' : time.time() - current_time, 'memory_uasge': memory_info}
+        metrics_no_avg = {'accu' : accuracy_score, 'mcc' : matthews_corrcoef, 'time' : time.time() - current_time, 'memory_usage': memory_info}
         # accuracy and mcc
         for metric_name, metric_func in metrics_no_avg.items():
-            if(metric_name=='time'):
+            if(metric_name=='time' or metric_name=='memory_usage'):
                 metric = metric_func
             else:
                 metric = metric_func(labels, preds)
