@@ -4,7 +4,6 @@ import torch.nn as nn
 from torch.optim.optimizer import Optimizer
 import numpy as np
 import gc
-
 required=True
 
 class NYS_ADMM(Optimizer):
@@ -30,10 +29,23 @@ class NYS_ADMM(Optimizer):
         self.h = torch.zeros(col, h_dim.shape[0]).to(device)
         self.idx = torch.randperm(h_dim.shape[0])[:col]
         self.col=col
-        
+
 
     def __setstate__(self, state):
         super(NYS_ADMM, self).__setstate__(state)
+
+    def custom_multi_margin_loss(self, x, y, margin=1.0):
+    
+        n = x.size(0)
+        num_classes = x.size(1)
+        loss = torch.zeros(n)
+        for i in range(n):
+            correct_class_score = x[i, y[i]]
+            incorrect_class_losses = torch.relu(margin - correct_class_score + x[i, :])
+            # incorrect_class_losses[y[i]] = 0
+            loss[i] = torch.sum(incorrect_class_losses)
+
+        return loss
 
     def compute(self, gradloader, model, model_type):
 
@@ -45,19 +57,21 @@ class NYS_ADMM(Optimizer):
         for group in self.param_groups:
             outputs, _ = model(X)
             if(model_type == 'SVM'):
-                weights = model.logits.weight.view(-1,1)
-                loss = F.multi_margin_loss(outputs, y) + (0.01 * torch.sum(weights**2))
+                weights = model.logits.weight.view(-1,1).squeeze()
+                loss = torch.mean(self.custom_multi_margin_loss(outputs,y)) + (0.1 * torch.sum(weights**2))
+                # loss = torch.mean(torch.relu(1-(outputs*y.reshape(-1,1))**2)) + (0.5 * torch.sum(weights**2))
+                
             else:
                 loss = F.cross_entropy(outputs, y)
-
-            g = torch.autograd.grad(loss, group['params'], create_graph=True, retain_graph=True)
-            g = torch.cat([gi.view(-1) for gi in g])
+            
+            grads = torch.autograd.grad(loss, group['params'], create_graph=True, retain_graph=True)
+            g = torch.cat([gi.view(-1) for gi in grads])
             for j in range(self.col):
                 if j == self.col-1:
                     self.h[j] = torch.cat([hi.reshape(-1).data for hi in torch.autograd.grad(g[self.idx[j]], group['params'], retain_graph=False)])
                 else:
                     self.h[j] = torch.cat([hi.reshape(-1).data for hi in torch.autograd.grad(g[self.idx[j]], group['params'], retain_graph=True)])
-            # self.h = self.h/len(X)
+            
             M = self.h[:,self.idx].to(self.device)
             M_eigenvals=torch.linalg.eigvalsh(M)
             min_eigen=torch.min(M_eigenvals)

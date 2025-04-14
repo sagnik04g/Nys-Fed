@@ -25,7 +25,7 @@ device = 'cuda' if torch.cuda.is_available() else 'cpu'
 metrics_with_avg = {'prec' : precision_score, 'recl' : recall_score, 'f1' : f1_score}
 avg = 'macro'
 current_time = time.time()
-memory_info=0
+memory_info=[0]
 # metrics that dont require average parameter
 metrics_no_avg = {'accu' : accuracy_score, 'mcc' : matthews_corrcoef}
 
@@ -87,7 +87,9 @@ class LogisticClass(nn.Module):
         self.binary = True
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+
         h = x.view(-1, x[0].flatten().shape[0])  # Flatten the input tensor 
+        
         # Apply sigmoid activation function
         x = torch.sigmoid(self.logits(h))  # Output layer
         return x,h
@@ -95,7 +97,8 @@ class LogisticClass(nn.Module):
 class SVM_torch(nn.Module):
     def __init__(self, args: object, input_dim:int = 68, num_class: int = 2) -> None:
         super(SVM_torch, self).__init__()
-        self.logits = nn.Linear(input_dim, num_class)
+        # self.fc1 = nn.Linear(input_dim,12)
+        self.logits = nn.Linear(input_dim, 2)
         self.optim = args.client_optim
         self.lr    = args.client_lr
         self.reuse_optim = args.reuse_optim
@@ -104,6 +107,7 @@ class SVM_torch(nn.Module):
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         h = x.view(-1, x[0].flatten().shape[0])  # Flatten the input tensor 
+        # h = self.fc1(x)
         x = self.logits(h)  # Output layer
         return x,h
 
@@ -302,6 +306,18 @@ class Custom_Resnet(torch.nn.Module):
         x = self.logits(h)
         return x, h
     
+def custom_multi_margin_loss(x, y, margin=1.0):
+    
+        n = x.size(0)
+        num_classes = x.size(1)
+        loss = torch.zeros(n)
+        for i in range(n):
+            correct_class_score = x[i, y[i]]
+            incorrect_class_losses = torch.relu(margin - correct_class_score + x[i, :])
+            # incorrect_class_losses[y[i]] = 0
+            loss[i] = torch.sum(incorrect_class_losses)
+
+        return loss
 
 def model_train_second_order(model: torch.nn.Module, y_k: torch.Tensor, data_loader: torch.utils.data.DataLoader, num_client_epoch: int,  col_opt: int, rho: float, alpha :float, lambda_i: int, sketch_m: int, stoch: bool, model_type: str, sketch_mu: float) -> None:
     
@@ -321,9 +337,10 @@ def model_train_second_order(model: torch.nn.Module, y_k: torch.Tensor, data_loa
                 inputs,targets = inputs.to(device), targets.to(device)
                 outputs, _ = model(inputs)
                 if(model_type == 'SVM'):
-                    # loss = F.multi_margin_loss(outputs, targets)
-                    weights = model.logits.weight.view(-1,1)
-                    loss = F.multi_margin_loss(outputs, targets) + (0.01 * torch.sum(weights**2))
+                    weights = model.logits.weight.view(-1,1).squeeze()
+                    # loss = F.multi_margin_loss(outputs, targets) + (0.1 * torch.sum(weights**2))
+                    # loss = torch.mean(torch.relu(1-(outputs*targets.reshape(-1,1))**2)) + (0.1 * torch.sum(weights**2))
+                    loss = torch.mean(custom_multi_margin_loss(outputs,targets)) + (0.1 * torch.sum(weights**2))
                 else:
                     loss = F.cross_entropy(outputs, targets)                
                 loss.backward()
@@ -337,12 +354,10 @@ def model_train_second_order(model: torch.nn.Module, y_k: torch.Tensor, data_loa
         else:
             X, y = data_loader.dataset[:]
             X, y = X.to(device), y.to(device)
-            #optimizer.zero_grad()
             outputs, _ = model(X)
-
             if(model_type == 'SVM'):
-                weights = model.logits.weight.view(-1,1)
-                loss = F.multi_margin_loss(outputs, y) + (0.01 * torch.sum(weights**2))
+                weights = model.logits.weight.view(-1,1)         
+                loss = torch.mean(custom_multi_margin_loss(outputs,y) + (0.1 * torch.sum(weights**2)))
             else:
                 loss = F.cross_entropy(outputs, y)
             optim.zero_grad()
@@ -366,8 +381,8 @@ def model_train_second_order(model: torch.nn.Module, y_k: torch.Tensor, data_loa
                 
             optim.step()
             break
-    
-    memory_info = (mem_info.rss/(1024*1024)) ## store in MB
+    memory_info.clear()
+    memory_info.append(mem_info.rss/(1024*1024)) ## store in MB
     # stability
     for p in model.parameters():
         torch.nan_to_num_(p.data, nan=1e-9, posinf=1e-9, neginf=1e-9)
@@ -594,14 +609,15 @@ def model_eval(model: torch.nn.Module,
         return epoch_labels, epoch_predicts
     else:
         if(model_type=='SVM'):
-            loss = torch.mean(torch.clamp(1 - epoch_predicts * ((2 * epoch_labels.view(-1,1)) - 1), min=0))
+            loss = F.multi_margin_loss(epoch_predicts, epoch_labels)
             wght=model.logits.weight.view(-1,1)
-            loss += 0.01 * torch.sum(wght**2).to('cpu')
+            loss+=(0.01 * torch.sum(wght**2)).to('cpu')
+            # loss = torch.sum(max(0, 1 - (epoch_labels * epoch_predicts)))/len(y) + (0.01 * torch.sum(wght**2)).to('cpu')
         else:
             loss = F.cross_entropy(epoch_predicts, epoch_labels)
-        cal_metrics(epoch_labels, epoch_predicts, wandb_log, metric_prefix, model.binary, loss)
+        cal_metrics(epoch_labels, model_type, epoch_predicts, wandb_log, metric_prefix, model.binary, loss)
 
-def cal_metrics(labels: torch.Tensor, preds: torch.Tensor, wandb_log: dict[str, float], metric_prefix: str, binary: bool, loss) -> None:
+def cal_metrics(labels: torch.Tensor, model_type: str, preds: torch.Tensor, wandb_log: dict[str, float], metric_prefix: str, binary: bool, loss) -> None:
     """
     Compute metrics (loss, accuracy, MCC score, precision, recall, F1 score) using ground truth labels and logits.
 
@@ -612,11 +628,13 @@ def cal_metrics(labels: torch.Tensor, preds: torch.Tensor, wandb_log: dict[str, 
         metric_prefix (str): prefix for metric name.
         binary (bool): whether doing binary classification or multi-class classification.
     """
-
     wandb_log[metric_prefix + 'loss'] = loss
-        
+    
     if not binary: # multi-class    
         # get probability
+        # if(model_type=='SVM'):
+        #     preds = torch.softmax(preds, axis = 1)
+        # else:
         preds = torch.softmax(preds, axis = 1)
 
         # ROC AUC
@@ -628,7 +646,7 @@ def cal_metrics(labels: torch.Tensor, preds: torch.Tensor, wandb_log: dict[str, 
         # get class prediction
         preds = preds.argmax(axis = 1)
         
-        metrics_no_avg = {'accu' : accuracy_score, 'mcc' : matthews_corrcoef, 'time' : (time.time() - current_time), 'memory_uasge': memory_info}
+        metrics_no_avg = {'accu' : accuracy_score, 'mcc' : matthews_corrcoef, 'time' : (time.time() - current_time), 'memory_usage': memory_info[0]}
         # accuracy and mcc
         for metric_name, metric_func in metrics_no_avg.items():
             if(metric_name=='time' or metric_name=='memory_usage'):
@@ -644,17 +662,20 @@ def cal_metrics(labels: torch.Tensor, preds: torch.Tensor, wandb_log: dict[str, 
     
     else: # binary
         # get probability
-        preds = torch.softmax(preds, axis = 1)[:, 1]
+        # if(model_type=='SVM'):
+        #     preds = torch.softmax(preds, axis = 0)
+        # else:
+        preds = torch.softmax(preds, axis = 1)
         
         # ROC AUC
         try:
             wandb_log[metric_prefix + 'auc'] = roc_auc_score(labels, preds)
         except Exception:
             wandb_log[metric_prefix + 'auc'] = -1
-        
+        preds = preds.argmax(axis = 1)
         # get class prediction
         preds = preds.round()
-        metrics_no_avg = {'accu' : accuracy_score, 'mcc' : matthews_corrcoef, 'time' : time.time() - current_time, 'memory_usage': memory_info}
+        metrics_no_avg = {'accu' : accuracy_score, 'mcc' : matthews_corrcoef, 'time' : time.time() - current_time, 'memory_usage': memory_info[0]}
         # accuracy and mcc
         for metric_name, metric_func in metrics_no_avg.items():
             if(metric_name=='time' or metric_name=='memory_usage'):

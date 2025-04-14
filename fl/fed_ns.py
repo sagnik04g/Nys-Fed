@@ -26,18 +26,31 @@ class NewtonSketch(Optimizer):
     def __setstate__(self, state):
         super(NewtonSketch, self).__setstate__(state)
 
+    def custom_multi_margin_loss(self, x, y, margin=1.0):
+    
+        n = x.size(0)
+        num_classes = x.size(1)
+        loss = torch.zeros(n)
+        for i in range(n):
+            correct_class_score = x[i, y[i]]
+            incorrect_class_losses = torch.relu(margin - correct_class_score + x[i, :])
+            # incorrect_class_losses[y[i]] = 0
+            loss[i] = torch.sum(incorrect_class_losses)
+
+        return loss
+
     def compute(self, gradloader,model, model_type, stoch):
         "Hessian Computation"
         
         for group in self.param_groups:
             # for batch_idx, (inputs, targets) in enumerate(gradloader):
             inputs, targets = gradloader.dataset[:]
-            inputs, targets = inputs.cuda(self.device), targets.cuda(self.device)
+            inputs, targets = inputs.to(self.device), targets.to(self.device)
             #optimizer.zero_grad()
             outputs,_ = model(inputs)
             if(model_type == 'SVM'):
                 wght=model.logits.weight.view(-1,1)
-                loss = F.multi_margin_loss(outputs, targets) + (0.01 * torch.sum(wght**2))
+                loss = torch.mean(self.custom_multi_margin_loss(outputs, targets)) + (0.1 * torch.sum(wght**2))
             else:
                 loss = F.cross_entropy(outputs, targets)
                 
