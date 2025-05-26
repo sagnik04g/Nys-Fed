@@ -82,7 +82,7 @@ def federated_learning(args: object, train_clients: list[object], test_clients: 
         for client, client_model in zip(update_clients, client_models):
 
                    
-            if(args.col_opt != 0 or args.alpha!=0 or args.rho!=0):
+            if(args.col_opt != 0 or args.alpha!=0 or args.rho!=0 or args.done_alpha!=0):
                 client.local_train_second_order(client_model, y_k, client_lambda[client_iter], args)
                 
 
@@ -91,23 +91,20 @@ def federated_learning(args: object, train_clients: list[object], test_clients: 
                 client_sketches.append(sketch_matrix)
 
             else:
-                client.local_train_LBFGS(client_model, global_model, args)
+                client.local_train_first_order(client_model, global_model, args)
             
             client_iter+=1
 
             
         init_epoch+=1
-        yi_k=[torch.cat([p.grad.view(-1,1) for p in m.parameters()]).to(device) for m in client_models]
-        
-    
-        y_k=sum(yi_k)/len(yi_k)
-        # print("Actual y_k:" + str(torch.Tensor.norm(y_k)) + " Expected y_k:" + str(torch.Tensor.norm(y_k_check)))
-        # print("Average of client weights norm: " + str(torch.Tensor.norm(sum([torch.cat([p.view(-1) for p in m.parameters()]) for m in client_models])/len(client_models))))
-        # print("\n Global model weight norm: "+ str(torch.Tensor.norm(torch.cat([p.view(-1) for p in global_model.parameters()]))))
+        if(args.col_opt != 0 or args.alpha!=0 or args.rho!=0):
+            yi_k=[torch.cat([p.grad.view(-1,1) for p in m.parameters()]).to(device) for m in client_models]
+            y_k=sum(yi_k)/len(yi_k)
         
         # PS update
-        eval(args.fed_agg)(global_model, client_models, client_weights, client_sketches, sketch_mu, # basic FL parameters
-                           global_optim, y_k, # for FedOpt (FedAdam and FedAMS)
+        eval(args.fed_agg)(global_model, client_models, client_weights, global_optim,  # basic FL parameters
+                           client_sketches, sketch_mu, # for FedNS
+                            y_k, # for FedNew 
                            logits_optim, # for FedAwS 
                            current_global_epoch, args.global_epoch, args.class_C, args.base_agg, args.spreadout)
 
@@ -152,7 +149,7 @@ def server_eval(clients: list[object], wandb_log: dict[str, float], metric_prefi
     cal_metrics(labels, preds, wandb_log, metric_prefix)    
 
 # FedNew for ADMM method
-def FedNew(global_model: torch.nn.Module, client_models: list[torch.nn.Module], client_weights: list[int], client_sketches: list[torch.Tensor], sketch_mu: float, global_optim: torch.optim, y_k, *_) -> None:
+def FedNew(global_model: torch.nn.Module, client_models: list[torch.nn.Module], client_weights: list[int], *_) -> None:
 
     
     # global_model.train()
@@ -168,7 +165,7 @@ def FedNew(global_model: torch.nn.Module, client_models: list[torch.nn.Module], 
     new_global_params = weighted_avg_params(params = client_params, weights = client_weights)
     global_model.load_state_dict(new_global_params)
 
-def FedNS(global_model: torch.nn.Module, client_models: list[torch.nn.Module], client_weights: list[int], client_sketches: list[torch.Tensor], sketch_mu: float, global_optim: torch.optim, *_) -> None:
+def FedNS(global_model: torch.nn.Module, client_models: list[torch.nn.Module], client_weights: list[int], global_optim: torch.optim, client_sketches: list[torch.Tensor], sketch_mu: float, *_) -> None:
 
     # new_global_state_dict = copy.deepcopy(global_model.state_dict())
     global_hessian=torch.zeros(client_sketches[0].shape[1],client_sketches[0].shape[1]).to(device)
@@ -231,33 +228,33 @@ def FedOpt(global_model: torch.nn.Module, client_models: list[torch.nn.Module], 
     global_optim.step()
     global_optim.zero_grad()
 
-def FedAwS(global_model: torch.nn.Module, 
-           client_models: list[torch.nn.Module], 
-           client_weights: list[int], 
-           global_optim: torch.optim, 
-           logits_optim: torch.optim, 
-           *_) -> None:
-    """
-    Federated learning algorithm FedAwS.
+# def FedAwS(global_model: torch.nn.Module, 
+#            client_models: list[torch.nn.Module], 
+#            client_weights: list[int], 
+#            global_optim: torch.optim, 
+#            logits_optim: torch.optim, 
+#            *_) -> None:
+#     """
+#     Federated learning algorithm FedAwS.
 
-    Arguments:
-        global_model (torch.nn.Module): pytorch model (global model).
-        client_models (list[torch.nn.Module]): pytorch models (client models).
-        client_weights (list[int]): number of samples per client.
-        global_optim (torch.optim): (useless) pytorch optimizer for global model.
-        logits_optim (torch.optim): pytorch optimizer for logit layer of global model.
-    """
+#     Arguments:
+#         global_model (torch.nn.Module): pytorch model (global model).
+#         client_models (list[torch.nn.Module]): pytorch models (client models).
+#         client_weights (list[int]): number of samples per client.
+#         global_optim (torch.optim): (useless) pytorch optimizer for global model.
+#         logits_optim (torch.optim): pytorch optimizer for logit layer of global model.
+#     """
 
-    FedAvg(global_model, client_models, client_weights)
-    global_model.train()
+#     FedAgg(global_model, client_models, client_weights)
+#     global_model.train()
     
-    # spreadout regularizer
-    wb = torch.cat((global_model.logits.weight, global_model.logits.bias.view(-1, 1)), axis = 1)
-    cos_sim_mat = pairwise_cosine_similarity(wb)
-    cos_sim_mat = (cos_sim_mat > margin) * cos_sim_mat
-    loss = cos_sim_mat.sum() / 2
-    loss.backward()
+#     # spreadout regularizer
+#     wb = torch.cat((global_model.logits.weight, global_model.logits.bias.view(-1, 1)), axis = 1)
+#     cos_sim_mat = pairwise_cosine_similarity(wb)
+#     cos_sim_mat = (cos_sim_mat > margin) * cos_sim_mat
+#     loss = cos_sim_mat.sum() / 2
+#     loss.backward()
     
-    # apply optimizer
-    logits_optim.step()
-    logits_optim.zero_grad()
+#     # apply optimizer
+#     logits_optim.step()
+#     logits_optim.zero_grad()

@@ -38,31 +38,29 @@ class ADMM(Optimizer):
 
         return loss
     
-    def compute(self, gradloader, model, model_type):
+    def compute_hessian(self, gradloader, model, model_type):
         "Hessian Computation"
         self.model=model
         for group in self.param_groups:
             col = self.H.shape[0]
-            # for batch_idx, (inputs, targets) in enumerate(gradloader):
-            inputs, targets = gradloader.dataset[:]
-            inputs, targets = inputs.to(self.device), targets.to(self.device)
-            #optimizer.zero_grad()
-            outputs,_ = model(inputs)
-            if(model_type == 'SVM'):
-                wght=model.logits.weight.view(-1,1)
-                loss = torch.mean(self.custom_multi_margin_loss(outputs, targets)) + (0.1 * torch.sum(wght**2))        
-            else:
-                loss = F.cross_entropy(outputs, targets)
-
-            g = torch.autograd.grad(loss, group['params'], create_graph=True, retain_graph=True)
-            g = torch.cat([gi.view(-1) for gi in g])
-            for j in range(col):
-                if j == col-1:
-                    self.H[j] = torch.cat([hi.reshape(-1).data for hi in torch.autograd.grad(g[j], group['params'], retain_graph=False)])
+            for batch_idx, (inputs, targets) in enumerate(gradloader):
+                inputs, targets = inputs.to(self.device), targets.to(self.device)
+                #optimizer.zero_grad()
+                outputs,_ = model(inputs)
+                if(model_type == 'SVM'):
+                    wght=model.logits.weight.view(-1,1)
+                    loss = torch.mean(self.custom_multi_margin_loss(outputs, targets)) + (0.1 * torch.sum(wght**2))        
                 else:
-                    self.H[j] = torch.cat([hi.reshape(-1).data for hi in torch.autograd.grad(g[j], group['params'], retain_graph=True)])
+                    loss = F.cross_entropy(outputs, targets)
 
-        
+                g = torch.autograd.grad(loss, group['params'], create_graph=True, retain_graph=True)
+                g = torch.cat([gi.view(-1) for gi in g])
+                for j in range(col):
+                    if j == col-1:
+                        self.H[j] += torch.cat([hi.reshape(-1).data for hi in torch.autograd.grad(g[j], group['params'], retain_graph=False)])
+                    else:
+                        self.H[j] += torch.cat([hi.reshape(-1).data for hi in torch.autograd.grad(g[j], group['params'], retain_graph=True)])
+            self.H = self.H/len(gradloader)
 
     def step(self):
         H_alpha_rho = torch.linalg.pinv(self.H + (self.alpha+self.rho)*torch.eye(self.H.shape[0], self.H.shape[0]).to(self.device))

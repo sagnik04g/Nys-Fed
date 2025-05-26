@@ -10,14 +10,11 @@ class NYS_ADMM(Optimizer):
 
     def __init__(self, params, col_opt=required, lambda_i=required, y_k=required, alpha=required,rho=required, col=-1, device=required):
         
-        # if rho is not required and rho < 0.0:
-        #     raise ValueError("Invalid learning rate: {}".format(rho))
-
         defaults = dict(col=col,rho=rho,alpha=alpha)
         super(NYS_ADMM, self).__init__(params, defaults)
         self.y_k=y_k
         self.alpha=alpha
-        self.lambda_i=lambda_i
+        self.lambda_i = lambda_i
         self.rho = rho
         self.col_opt=col_opt
         param_grps_list=list(self.param_groups)
@@ -30,7 +27,6 @@ class NYS_ADMM(Optimizer):
         self.idx = torch.randperm(h_dim.shape[0])[:col]
         self.col=col
 
-
     def __setstate__(self, state):
         super(NYS_ADMM, self).__setstate__(state)
 
@@ -38,7 +34,7 @@ class NYS_ADMM(Optimizer):
     
         n = x.size(0)
         num_classes = x.size(1)
-        loss = torch.zeros(n)
+        loss = torch.zeros(n).to(self.device)
         for i in range(n):
             correct_class_score = x[i, y[i]]
             incorrect_class_losses = torch.relu(margin - correct_class_score + x[i, :])
@@ -46,71 +42,30 @@ class NYS_ADMM(Optimizer):
             loss[i] = torch.sum(incorrect_class_losses)
 
         return loss
-
-    def compute(self, gradloader, model, model_type):
-
-        # (inputs, targets)  for entire dataset deterministic update:
-        X, y = gradloader.dataset[:]
-        X, y = X.to(self.device), y.to(self.device)
-        """Nystrom-Approximated Curvature Information"""
-        
-        for group in self.param_groups:
-            outputs, _ = model(X)
-            if(model_type == 'SVM'):
-                weights = model.logits.weight.view(-1,1).squeeze()
-                loss = torch.mean(self.custom_multi_margin_loss(outputs,y)) + (0.1 * torch.sum(weights**2))
-                # loss = torch.mean(torch.relu(1-(outputs*y.reshape(-1,1))**2)) + (0.5 * torch.sum(weights**2))
-                
-            else:
-                loss = F.cross_entropy(outputs, y)
-            
-            grads = torch.autograd.grad(loss, group['params'], create_graph=True, retain_graph=True)
-            g = torch.cat([gi.view(-1) for gi in grads])
-            for j in range(self.col):
-                if j == self.col-1:
-                    self.h[j] = torch.cat([hi.reshape(-1).data for hi in torch.autograd.grad(g[self.idx[j]], group['params'], retain_graph=False)])
-                else:
-                    self.h[j] = torch.cat([hi.reshape(-1).data for hi in torch.autograd.grad(g[self.idx[j]], group['params'], retain_graph=True)])
-            
-            M = self.h[:,self.idx].to(self.device)
-            M_eigenvals=torch.linalg.eigvalsh(M)
-            min_eigen=torch.min(M_eigenvals)
-            torch.nan_to_num_(g.data, nan=1e-5, posinf=1e-5, neginf=1e-5)
-            norm_g = torch.Tensor.norm(g)
-            self.irho = 1/max(torch.sqrt(norm_g).item(),1)
-            if min_eigen.item() == 0 or min_eigen.item() <= 1e-5:
-                c_t = 1/(self.irho**0.5)
-            else:
-                c_t = 0
-            ## Changed M matrix, removed -ve eigenvals and made matrix P.S.D; change 1 with 2 to make matrix P.D
-            M = M + (2*max(-min_eigen.item(),0)+ c_t)*torch.eye(M.shape[0]).to(self.device)
-            M_ev=torch.linalg.eigvalsh(M)
-            min_eig=torch.min(M_ev)
-            print('min. eigen value: '+str(min_eig))
-            print('Norm g: '+str(norm_g),'irho='+str(self.irho))
-            rnk = torch.linalg.matrix_rank(M)
-            U, S, V = torch.svd(M)
-            ix = range(0, rnk)
-            U = U[:, ix]
-            S = torch.sqrt(torch.diag(1./S[ix]))
-            print('S: '+str(S.shape))
-            self.Z = torch.mm(self.h.t(), torch.mm(U, S))
-            self.Q = self.irho**2 * torch.mm(self.Z, torch.inverse((self.rho+self.alpha)*torch.eye(rnk).to(self.device) + self.irho * torch.mm(self.Z.t(), self.Z)))
-            del M
-
     
-    def compute_stochastic(self, loss, model):
-
+    def compute_hessian(self, gradloader, model, model_type):
+        self.model=model
         """Nystrom-Approximated Curvature Information"""
         for group in self.param_groups:
-            
-            g = torch.autograd.grad(loss, group['params'], create_graph=True, retain_graph=True)
-            g = torch.cat([gi.view(-1) for gi in g])
-            for j in range(self.col):
-                if j == self.col-1:
-                    self.h[j] = torch.cat([hi.reshape(-1).data for hi in torch.autograd.grad(g[self.idx[j]], group['params'], retain_graph=False)])
+            for inputs, targets in gradloader:
+                inputs, targets = inputs.to(self.device), targets.to(self.device)
+                with torch.backends.cudnn.flags(enabled=False):
+                    outputs, _ = model(inputs)
+                if(model_type == 'SVM'):
+                    weights = model.logits.weight.view(-1,1).squeeze()
+                    loss = torch.mean(self.custom_multi_margin_loss(outputs,targets) + (0.1 * torch.sum(weights**2))).to(self.device)
+                    # loss = torch.mean(torch.relu(1-(outputs*y.reshape(-1,1))**2)) + (0.5 * torch.sum(weights**2))
                 else:
-                    self.h[j] = torch.cat([hi.reshape(-1).data for hi in torch.autograd.grad(g[self.idx[j]], group['params'], retain_graph=True)])
+                    loss = F.cross_entropy(outputs, targets)
+                g = torch.autograd.grad(loss, group['params'], create_graph=True, retain_graph=True)
+                g = torch.cat([gi.view(-1) for gi in g])
+                for j in range(self.col):
+                    if j == self.col-1:
+                        self.h[j] += torch.cat([hi.reshape(-1).data for hi in torch.autograd.grad(g[self.idx[j]], group['params'], retain_graph=False)])
+                    else:
+                        self.h[j] += torch.cat([hi.reshape(-1).data for hi in torch.autograd.grad(g[self.idx[j]], group['params'], retain_graph=True)])
+            
+            self.h=self.h/len(gradloader)
             M = self.h[:,self.idx].to(self.device)
             M_eigenvals=torch.linalg.eigvalsh(M)
             min_eigen=torch.min(M_eigenvals)
@@ -136,12 +91,10 @@ class NYS_ADMM(Optimizer):
             self.Z = torch.mm(self.h.t(), torch.mm(U, S))
             self.Q = self.irho**2 * torch.mm(self.Z, torch.inverse((self.rho+self.alpha)*torch.eye(rnk).to(self.device) + self.irho * torch.mm(self.Z.t(), self.Z)))
             del M
-           
-        
+            torch.cuda.empty_cache()
 
 
     def step(self):
-                
         """Compute the scaled gradient
         """
         ls=0

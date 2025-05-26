@@ -1,6 +1,6 @@
 import random
-
 import psutil
+import gpustat
 from fl.fed_ns import NewtonSketch
 from fl.nys_admm import NYS_ADMM
 import torch
@@ -9,6 +9,7 @@ from torch.nn.functional import relu, avg_pool2d
 from typing import List
 import torch.nn.functional as F
 import copy
+import os
 import time
 import numpy as np
 import torchvision.models as models
@@ -16,10 +17,13 @@ import torchvision.transforms as transforms
 from sklearn.metrics import accuracy_score, precision_score, recall_score, matthews_corrcoef, f1_score, roc_auc_score, confusion_matrix
 from fl.nsgd import NSGD
 from fl.fed_admm import ADMM
-
+from fl.fed_done import DONE
 # GPU
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
-# device ='cpu'
+if torch.cuda.is_available():
+    cuda_id=int(os.environ.get("CUDA_VISIBLE_DEVICES"))
+    device='cuda'    
+else:
+    device ='cpu'
 
 # metrics that require average parameter
 metrics_with_avg = {'prec' : precision_score, 'recl' : recall_score, 'f1' : f1_score}
@@ -55,9 +59,7 @@ class ResidualBlock(nn.Module):
         self.shortcut = nn.Sequential()
         if stride != 1 or in_channels != out_channels:
             # If the input and output dimensions are not the same, we need to change the input
-            self.shortcut = nn.Sequential(
-                nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=stride, padding=0),
-                nn.BatchNorm2d(out_channels)
+            self.shortcut = nn.Sequential(nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=stride, padding=0), nn.BatchNorm2d(out_channels)
             )
 
     def forward(self, x):
@@ -83,7 +85,6 @@ class LogisticClass(nn.Module):
         self.lr    = args.client_lr
         self.reuse_optim = args.reuse_optim
         self.optim_state = None
-
         self.binary = True
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -128,20 +129,10 @@ class Resnet18(torch.nn.Module):
 
         self.resnet18 = models.resnet18(pretrained=True)
         self.resnet18.fc = torch.nn.Identity()
+        if(args.done_alpha!=0 or 'fed-admm' in args.project or 'fed-ns' in args.project):
+            for p in self.resnet18.parameters():                # freeze resnet50
+                p.requires_grad = False
         self.logits = torch.nn.Linear(in_features = 512, out_features = num_class)
-        if(input_dim==784):
-         self.t = transforms.Compose([
-            transforms.Resize(256),  # Resize to a slightly larger size first
-            transforms.CenterCrop(224), # Then crop to 224x224
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])])
-        if(input_dim==3072):
-         self.t = transforms.Compose([
-            transforms.Resize(256),  # Resize to a slightly larger size first
-            transforms.CenterCrop(224), # Then crop to 224x224
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.4914, 0.4822, 0.4465], std=[0.2470, 0.2435, 0.2616])])
-
 
         self.optim = args.client_optim
         self.lr    = args.client_lr
@@ -161,9 +152,6 @@ class Resnet18(torch.nn.Module):
         """
 
         
-        # x is of shape (batch_size, 1, 224, 224)
-        x = x.expand(-1, 3, -1, -1)
-        x = self.t(x)
         h = self.resnet18(x)
         x = self.logits(h)
         return x, h
@@ -185,28 +173,14 @@ class Resnet50(torch.nn.Module):
 
         self.resnet50 = models.resnet50(pretrained=True)
         self.resnet.fc = torch.nn.Identity()
-        
+        if(args.done_alpha!=0 or 'fed-admm' in args.project or 'fed-ns' in args.project):
+            for p in self.resnet50.parameters():                # freeze resnet50
+                p.requires_grad = False
         self.logits = torch.nn.Linear(in_features = 2048, out_features = num_class)
-        if(input_dim==784):
-         self.t = transforms.Compose([
-            transforms.Resize(256),  # Resize to a slightly larger size first
-            transforms.CenterCrop(224), # Then crop to 224x224
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])])
-        if(input_dim==3072):
-         self.t = transforms.Compose([
-            transforms.Resize(256),  # Resize to a slightly larger size first
-            transforms.CenterCrop(224), # Then crop to 224x224
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.4914, 0.4822, 0.4465], std=[0.2470, 0.2435, 0.2616])])
-
-
-
         self.optim = args.client_optim
         self.lr    = args.client_lr
         self.reuse_optim = args.reuse_optim
         self.optim_state = None
-
         self.binary = False
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -218,10 +192,12 @@ class Resnet50(torch.nn.Module):
             x (torch.Tensor): logits (not softmaxed yet).
             h (torch.Tensor): latent features (useful for tSNE plot and some FL algorithms).
         """    
-        
-        # x is of shape (batch_size, 1, 224, 224)
-        x = x.expand(-1, 3, -1, -1)
-        x = self.t(x)
+        if(x[0].shape==784):
+            x=x.reshape(-1,1,28,28)
+            x = F.pad(x,(18,18,18,18),mode='constant', value=0)
+        if(x[0].shape==3072):
+            x=x.reshape(-1,1,32,32)
+            x = F.pad(x = F.pad(x,(16,16,16,16),mode='constant', value=0))
         h = self.resnet50(x)
         x = self.logits(h)
         return x, h
@@ -242,18 +218,11 @@ class Custom_Resnet(torch.nn.Module):
         super(Custom_Resnet, self).__init__()
         if input_dim==3072:
          input_channels=3
-         out_dim=288
+         out_dim=512
         if input_dim==784:
          input_channels=1
-         out_dim=128
-        if input_dim==300:
-         input_channels=1
-         out_dim=228
-        if input_dim==68:
-         input_channels=1
-         out_dim=32
-         
-        
+         out_dim=288
+
         self.encoder = torch.nn.Sequential(
         ResidualBlock(input_channels,8, stride=1),
         nn.BatchNorm2d(8),
@@ -261,19 +230,20 @@ class Custom_Resnet(torch.nn.Module):
         ResidualBlock(8, 16, stride=2),
         nn.BatchNorm2d(16),
         nn.LeakyReLU(0.1),
-        ResidualBlock(16, 32, stride=3),
+        ResidualBlock(16, 32, stride=2),
         nn.BatchNorm2d(32),
         nn.LeakyReLU(0.1),
         nn.MaxPool2d(kernel_size = 2, stride = 2),
         nn.Flatten(), # Downsample
         nn.LeakyReLU(0.1),
         # Final fully connected layer (for example, for classification)
-        nn.Linear(out_dim, 1024),
-        nn.Linear(1024, 128),
+        nn.Linear(out_dim, 2048),
         nn.LeakyReLU(0.1))
-
-        self.logits = nn.Linear(128, num_class)
-
+        if(args.done_alpha!=0 or 'fed-admm' in args.project or 'fed-ns' in args.project):
+            for p in self.encoder.parameters():                # freeze resnet50
+                p.requires_grad = False
+        self.logits = nn.Linear(2048, num_class)
+       
         self.optim = args.client_optim
         self.lr    = args.client_lr
         self.reuse_optim = args.reuse_optim
@@ -305,6 +275,52 @@ class Custom_Resnet(torch.nn.Module):
         h = self.encoder(x)
         x = self.logits(h)
         return x, h
+        
+class LSTM_shakespeare(torch.nn.Module):
+    """
+    LSTM model for Shakespeare dataset. The model structure follows the LEAF framework.
+    """
+
+    def __init__(self, args: object, embedding_dim: int = 8, hidden_size: int = 256, num_class: int = 80) -> None:
+        """
+        Arguments:
+            args (argparse.Namespace): parsed argument object.
+            embedding_dim (int): dimension of character embedding.
+            hidden_size (int): dimension of LSTM hidden state.
+            num_class (int): number of classes (unique characters) in the dataset.
+        """
+
+        super(LSTM_shakespeare, self).__init__()
+
+        self.embedding = torch.nn.Embedding(num_embeddings = num_class, embedding_dim = embedding_dim)
+        self.encoder   = torch.nn.LSTM(input_size = embedding_dim, hidden_size = hidden_size, num_layers = 2, batch_first = True)
+        if(args.done_alpha!=0 or 'fed-admm' in args.project or 'fed-ns' in args.project):
+            for p in self.encoder.parameters():                # freeze resnet50
+                p.requires_grad = False
+        self.logits    = torch.nn.Linear(in_features = hidden_size, out_features = num_class)
+
+        self.optim = args.client_optim
+        self.lr    = args.client_lr
+        self.reuse_optim = args.reuse_optim
+        self.optim_state = None
+
+        self.binary = False
+
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Arguments:
+            x (torch.Tensor): input image tensor.
+        
+        Returns:
+            x (torch.Tensor): logits (not softmaxed yet).
+            h (torch.Tensor): latent features (useful for tSNE plot and some FL algorithms).
+        """
+
+        x = self.embedding(x)
+        x, (hn, cn) = self.encoder(x)
+        h = x[:, -1, :]
+        x = self.logits(h)
+        return x, h
     
 def custom_multi_margin_loss(x, y, margin=1.0):
     
@@ -319,71 +335,59 @@ def custom_multi_margin_loss(x, y, margin=1.0):
 
         return loss
 
-def model_train_second_order(model: torch.nn.Module, y_k: torch.Tensor, data_loader: torch.utils.data.DataLoader, num_client_epoch: int,  col_opt: int, rho: float, alpha :float, lambda_i: int, sketch_m: int, stoch: bool, model_type: str, sketch_mu: float) -> None:
+def model_train_second_order(model: torch.nn.Module, y_k: torch.Tensor, data_loader: torch.utils.data.DataLoader, num_client_epoch: int,  col_opt: int, rho: float, alpha :float, lambda_i: int, sketch_m: int, model_type: str, sketch_mu: float, done_alpha: float, d_i_previous) -> None:
     
     model.train()
-    optim = model.optim(model.parameters(), lr = model.lr)
-    hessian_sketch = None
+    optim = model.optim(model.parameters(), lr = model.lr, momentum=0.5)
+    d_i_k=None
+    hessian_sketch=None
+    params_shape=torch.cat([p.view(-1) for p in model.parameters()]).shape[0]
+    # condition for fed-NS
+    if(sketch_m!=0 and col_opt==0):
+        fed_ns_pre = NewtonSketch(model.parameters(), sketch_m, sketch_mu, device)
+        hessian_sketch = fed_ns_pre.compute_hessian_sketch(data_loader,model, model_type)
     # for stochastic update
-    random_batch = random.randint(0, len(data_loader)-1)
-    process = psutil.Process()
-    mem_info = process.memory_info()
-    for batch_idx, (inputs, targets) in enumerate(data_loader):
-
-        if(stoch):
-            ## Picking a random batch
-            if batch_idx == random_batch:
-                optim.zero_grad()
-                inputs,targets = inputs.to(device), targets.to(device)
-                outputs, _ = model(inputs)
-                if(model_type == 'SVM'):
-                    weights = model.logits.weight.view(-1,1).squeeze()
-                    # loss = F.multi_margin_loss(outputs, targets) + (0.1 * torch.sum(weights**2))
-                    # loss = torch.mean(torch.relu(1-(outputs*targets.reshape(-1,1))**2)) + (0.1 * torch.sum(weights**2))
-                    loss = torch.mean(custom_multi_margin_loss(outputs,targets)) + (0.1 * torch.sum(weights**2))
-                else:
-                    loss = F.cross_entropy(outputs, targets)                
-                loss.backward()
-            ## stochastic update on a random batch for nys-fed
-                nys_admm_stoc = NYS_ADMM(model.parameters(),col_opt, lambda_i, y_k, alpha, rho, -1, device)
-                if(col_opt!=0 and alpha!=0):
-                    nys_admm_stoc.compute_stochastic(loss, model)
-                    nys_admm_stoc.step()
-                    optim.step()
-                    break
+    if col_opt!=0:
+        preconditioner = NYS_ADMM(model.parameters(),col_opt, lambda_i, y_k, alpha, rho, -1, device)
+        preconditioner.compute_hessian(data_loader, model, model_type)
+    if(alpha!=0 and col_opt==0):
+        preconditioner = ADMM(model.parameters(),lambda_i, y_k, alpha, rho, device)
+        preconditioner.compute_hessian(data_loader, model, model_type)
+    if(done_alpha!=0 and col_opt==0):
+        preconditioner = DONE(model.parameters(), d_i_previous, done_alpha, device)
+        d_i_k=preconditioner.compute_hessian(data_loader, model, model_type)
+    for inputs, targets in data_loader:
+        ## Picking a random batch
+        inputs,targets = inputs.to(device), targets.to(device)
+        outputs, _ = model(inputs)
+        if(model_type == 'SVM'):
+            weights = model.logits.weight.view(-1,1).squeeze()
+            # loss = F.multi_margin_loss(outputs, targets) + (0.1 * torch.sum(weights**2))
+            # loss = torch.mean(torch.relu(1-(outputs*targets.reshape(-1,1))**2)) + (0.1 * torch.sum(weights**2))
+            loss = torch.mean(custom_multi_margin_loss(outputs,targets)) + (0.1 * torch.sum(weights**2))
         else:
-            X, y = data_loader.dataset[:]
-            X, y = X.to(device), y.to(device)
-            outputs, _ = model(X)
-            if(model_type == 'SVM'):
-                weights = model.logits.weight.view(-1,1)         
-                loss = torch.mean(custom_multi_margin_loss(outputs,y) + (0.1 * torch.sum(weights**2)))
-            else:
-                loss = F.cross_entropy(outputs, y)
-            optim.zero_grad()
-            loss.backward()
-
-            # condition for fed-nys-admm
-            if(col_opt!=0):
-                nys_admm = NYS_ADMM(model.parameters(),col_opt, lambda_i, y_k, alpha, rho, -1, device)
-                nys_admm.compute(data_loader,model, model_type)
-                nys_admm.step()
+            loss = F.cross_entropy(outputs, targets)
+            #if(done_alpha!=0):
+            #    loss = -loss
+        optim.zero_grad()
+        loss.backward()
+        ## For Second-Order gradient calculation
+        preconditioner.step()
+        optim.step()
         
-            # condition for fed-new
-            if(alpha!=0 and col_opt==0):
-                admm_pre = ADMM(model.parameters(),lambda_i, y_k, alpha, rho, device)
-                admm_pre.compute(data_loader, model, model_type)
-                admm_pre.step()
-            # condition for fed-NS
-            if(sketch_m!=0 and col_opt==0):
-                fed_ns_pre = NewtonSketch(model.parameters(), sketch_m, sketch_mu, device)
-                hessian_sketch = fed_ns_pre.compute(data_loader,model, model_type, stoch)
-                
-            optim.step()
-            break
+    if(device=='cuda'):
+        try:
+            gpus = gpustat.GPUStatCollection.new_query()
+            processes = gpus[cuda_id].processes
+            for process in processes:
+                if(model_type in process['full_command']):
+                    memory_usage=float(process['gpu_memory_usage'])
+        except Exception as e:
+            print(f"Error getting GPU info: {e}")
+    else:
+        memory_usage = psutil.Process().memory_info().rss/(1024*1024)
     memory_info.clear()
-    memory_info.append(mem_info.rss/(1024*1024)) ## store in MB
-    # stability
+    memory_info.append(memory_usage)         # stability
     for p in model.parameters():
         torch.nan_to_num_(p.data, nan=1e-9, posinf=1e-9, neginf=1e-9)
 
@@ -391,48 +395,65 @@ def model_train_second_order(model: torch.nn.Module, y_k: torch.Tensor, data_loa
     # save optimizer state
     if model.reuse_optim:
         model.optim_state = copy.deepcopy(optim.state_dict())
-
-
     if hessian_sketch is not None and sketch_m!=0:
         return hessian_sketch
-    
+    if d_i_k is not None:
+        return d_i_k
     return
 
-def model_train_LBFGS(model: torch.nn.Module, data_loader: torch.utils.data.DataLoader, model_type: str) -> None:
-    
+def model_train_first_order(model: torch.nn.Module, data_loader: torch.utils.data.DataLoader, num_client_epoch: int) -> None:
+    """
+    Train a model when FedProx is chosen for federated learning.
 
+    Arguments:
+        model (torch.nn.Module): pytorch model (client model).
+        global_model (torch.nn.Module): pytorch model (global model).
+        data_loader (torch.utils.data.DataLoader): pytorch data loader.
+        num_client_epoch (int): number of training epochs.
+    """
+
+    process = psutil.Process()
+    mem_info = process.memory_info()
     model.train()
-    optim = torch.optim.LBFGS(model.parameters(), lr = model.lr, max_iter=50, history_size=100)
+    optim = model.optim(model.parameters(), lr = model.lr, momentum=0.5)
 
     # load previous optimizer state
     if model.reuse_optim and model.optim_state is not None:
         optim.load_state_dict(model.optim_state)
     
-    # for current_client_epoch in range(num_client_epoch):
-    for batch_id, (inputs, targets) in enumerate(data_loader):
-        inputs, targets = inputs.cuda(device), targets.cuda(device)
-        def closure():
+    for current_client_epoch in range(num_client_epoch):
+        for batch_id, (x, y) in enumerate(data_loader):
+            x = x.to(device)
+            y = y.to(device)
+            
+            p, _ = model(x)
+            loss = F.cross_entropy(p, y)
             optim.zero_grad()
-            outputs, _ = model(inputs)
-            if(model_type == 'SVM'):
-                loss = F.multi_margin_loss(outputs, targets)
-                wght=model.logits.weight.squeeze()
-                loss += 0.01 * torch.sum(wght**2)
-            else:
-                loss = F.cross_entropy(outputs, targets)
+
             loss.backward()
-            return loss
-        optim.step(closure)
-
-        # stability
-        for p in model.parameters():
-            torch.nan_to_num_(p.data, nan=1e-5, posinf=1e-5, neginf=1e-5)
-
+            optim.step()
+            
+            # stability
+            for p in model.parameters():
+                torch.nan_to_num_(p.data, nan=1e-5, posinf=1e-5, neginf=1e-5)
+    if(device=='cuda'):
+        try:
+            gpus = gpustat.GPUStatCollection.new_query()
+            processes = gpus[cuda_id].processes
+            for process in processes:
+                if(process['full_command'][9]==model_type):
+                    memory_usage=float(process['gpu_memory_usage'])
+                else:
+                    memory_usage=0.0
+        except Exception as e:
+            print(f"Error getting GPU info: {e}")
+    else:
+        memory_usage = psutil.Process().memory_info().rss/(1024*1024)
+    memory_info.clear()
+    memory_info.append(memory_usage)     # stability
     # save optimizer state
     if model.reuse_optim:
         model.optim_state = copy.deepcopy(optim.state_dict())
-    
-    return
     
 
 def model_train_FedProx(model: torch.nn.Module, global_model: torch.nn.Module, data_loader: torch.utils.data.DataLoader, num_client_epoch: int) -> None:
@@ -485,7 +506,7 @@ def model_train_FedProx(model: torch.nn.Module, global_model: torch.nn.Module, d
     if model.reuse_optim:
         model.optim_state = copy.deepcopy(optim.state_dict())
 
-def model_train_MOON(model: torch.nn.Module, data_loader: torch.utils.data.DataLoader, previous_features: torch.Tensor) -> torch.Tensor:
+def model_train_MOON(model: torch.nn.Module, global_model: torch.nn.Module, data_loader: torch.utils.data.DataLoader, previous_features: torch.Tensor) -> torch.Tensor:
     """
     Train a model when MOON is chosen for federated learning.
 
@@ -612,7 +633,7 @@ def model_eval(model: torch.nn.Module,
             loss = F.multi_margin_loss(epoch_predicts, epoch_labels)
             wght=model.logits.weight.view(-1,1)
             loss+=(0.01 * torch.sum(wght**2)).to('cpu')
-            # loss = torch.sum(max(0, 1 - (epoch_labels * epoch_predicts)))/len(y) + (0.01 * torch.sum(wght**2)).to('cpu')
+            
         else:
             loss = F.cross_entropy(epoch_predicts, epoch_labels)
         cal_metrics(epoch_labels, model_type, epoch_predicts, wandb_log, metric_prefix, model.binary, loss)
