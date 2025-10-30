@@ -1,8 +1,8 @@
 from make_niid_dataset import assign_data_to_clients_niid, make_data_from_images,make_json, NumpyEncoder
 import json
 
-train_images_path = r"/home/ub/Downloads/CINIC10_dataset/train"
-test_images_path = r"/home/ub/Downloads/CINIC10_dataset/test"
+train_images_path = r"path to cinic10 train split dataset"
+test_images_path = r"path to cinic10 test split dataset"
 cinic10_train_X,cinic10_train_Y = make_data_from_images(train_images_path)
 cinic10_test_X,cinic10_test_Y = make_data_from_images(test_images_path)
 

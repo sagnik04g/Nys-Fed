@@ -1,22 +1,26 @@
 # bash code for reproducing our experiments
-for project in fednys-admm-cifar10 # celeba shakespeare
+for project in fed-admm-phishing fed-admm-w8a
 do
-    for seed in 444
+    for model in logistic SVM
     do
-        e=1
-        for c in 8 16 32 64
+        for c in 8 16 32
         do
-            python main_FL.py -p $project -seed $seed -fl FedNew -C $c -E $e --global_epoch 1000 --rho 0.1 --alpha 0.25 --col_opt 1 --min_sample 16
-            python main_FL.py -p $project -seed $seed -fl FedNew -C $c -E $e --global_epoch 1000 --rho 0.1 --alpha 0.25 --col_opt 2 --min_sample 16
-            python main_FL.py -p $project -seed $seed -fl FedNew -C $c -E $e --global_epoch 1000 --rho 0.1 --alpha 0.25 --col_opt 5 --min_sample 16
-            python main_FL.py -p $project -seed $seed -fl FedNew -C $c -E $e --global_epoch 1000 --rho 0.1 --alpha 0.25 --col_opt 10 --min_sample 16
+            python main_FL.py -p $project -seed 444 -fl FedNew -model $model -C $c -E 1 --global_epoch 1000 --rho 0.1 --alpha 0.25  --min_sample 16
+
         done
-        for c in 8 16 32 64
+    done
+done
+
+for project in fed-ns-phishing fed-ns-w8a
+do
+    for model in logistic SVM
+    do
+        for c in 8 16 32 
         do
-            python main_FL.py -p $project -seed $seed -fl FedNew -C $c -E $e --global_epoch 1000 --rho 0.1 --alpha 0.25 --col_opt 1 --min_sample 16 --stoch True
-            python main_FL.py -p $project -seed $seed -fl FedNew -C $c -E $e --global_epoch 1000 --rho 0.1 --alpha 0.25 --col_opt 2 --min_sample 16 --stoch True
-            python main_FL.py -p $project -seed $seed -fl FedNew -C $c -E $e --global_epoch 1000 --rho 0.1 --alpha 0.25 --col_opt 5 --min_sample 16 --stoch True
-            python main_FL.py -p $project -seed $seed -fl FedNew -C $c -E $e --global_epoch 1000 --rho 0.1 --alpha 0.25 --col_opt 10 --min_sample 16 --stoch True
+            for s in 5 15 25 50 100
+            do 
+                python main_FL.py -p $project -seed 444 -fl FedNS -model $model -C $c -E 1 --global_epoch 1000 --sketch_mu 0.01 --sketch_m $s  --min_sample 16
+            done
         done
     done
 done

@@ -4,6 +4,7 @@ import math
 import tqdm
 import copy
 import wandb
+import time
 from fl.client import Client
 from fl.models import model_eval, cal_metrics
 from utils import weighted_avg_params, weighted_avg
@@ -14,7 +15,7 @@ device = 'cuda' if torch.cuda.is_available() else 'cpu'
 # device = 'cpu'
 # FedAwS cosine similarity margin
 margin = 0
-    
+
 def federated_learning(args: object, train_clients: list[object], test_clients: list[object], global_model: torch.nn.Module) -> None:
     """
     Main loop for federated learning.
@@ -68,7 +69,6 @@ def federated_learning(args: object, train_clients: list[object], test_clients: 
     init_epoch=0
     
 
-
     for current_global_epoch in tqdm.tqdm(range(args.global_epoch)):
         # select clients which are updated in this round
         update_clients = np.random.choice(train_clients, num_update_client, replace = False)
@@ -76,11 +76,11 @@ def federated_learning(args: object, train_clients: list[object], test_clients: 
         client_models  = [copy.deepcopy(global_model) for c in update_clients]
         client_sketches = []
         sketch_mu = args.sketch_mu
-        client_iter = 0    
+        client_iter = 0
+        end = time.time()
 
         # training
         for client, client_model in zip(update_clients, client_models):
-
                    
             if(args.col_opt != 0 or args.alpha!=0 or args.rho!=0 or args.done_alpha!=0):
                 client.local_train_second_order(client_model, y_k, client_lambda[client_iter], args)
@@ -91,7 +91,7 @@ def federated_learning(args: object, train_clients: list[object], test_clients: 
                 client_sketches.append(sketch_matrix)
 
             else:
-                client.local_train_first_order(client_model, global_model, args)
+                previous_features=client.local_train_first_order(client_model, global_model, args, previous_features)
             
             client_iter+=1
 
@@ -107,7 +107,8 @@ def federated_learning(args: object, train_clients: list[object], test_clients: 
                             y_k, # for FedNew 
                            logits_optim, # for FedAwS 
                            current_global_epoch, args.global_epoch, args.class_C, args.base_agg, args.spreadout)
-
+        print(f"Global communication time taken: ",{time.time()-end},"seconds")
+        
         # lambda_i update for one-pass admm step
         for client_id in range(len(client_lambda)):
             client_lambda[client_id] += (args.rho * (yi_k[client_id] - y_k)).to(device)
@@ -190,7 +191,7 @@ def FedNS(global_model: torch.nn.Module, client_models: list[torch.nn.Module], c
     global_optim.step()
     global_optim.zero_grad()
 
-def FedAgg(global_model: torch.nn.Module, client_models: list[torch.nn.Module], client_weights: list[int],  *_) -> None:
+def FedAvg(global_model: torch.nn.Module, client_models: list[torch.nn.Module], client_weights: list[int],  *_) -> None:
     """
     Federated learning algorithm FedAvg.
 
@@ -204,7 +205,7 @@ def FedAgg(global_model: torch.nn.Module, client_models: list[torch.nn.Module], 
     new_global_params = weighted_avg_params(params = client_params, weights = client_weights)
     global_model.load_state_dict(new_global_params)
 
-def FedOpt(global_model: torch.nn.Module, client_models: list[torch.nn.Module], client_weights: list[int], global_optim: torch.optim, *_) -> None:
+def FedAdam(global_model: torch.nn.Module, client_models: list[torch.nn.Module], client_weights: list[int], global_optim: torch.optim, *_) -> None:
     """
     Federated learning algorithm FedOpt. Depending on the choice of optimizer, it can be deviated into different variates like FedAdam and FedAMS.
 

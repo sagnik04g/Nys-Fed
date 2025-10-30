@@ -15,7 +15,6 @@ import numpy as np
 import torchvision.models as models
 import torchvision.transforms as transforms
 from sklearn.metrics import accuracy_score, precision_score, recall_score, matthews_corrcoef, f1_score, roc_auc_score, confusion_matrix
-from fl.nsgd import NSGD
 from fl.fed_admm import ADMM
 from fl.fed_done import DONE
 # GPU
@@ -127,7 +126,7 @@ class Resnet18(torch.nn.Module):
 
         super(Resnet18, self).__init__()
 
-        self.resnet18 = models.resnet18(pretrained=True)
+        self.resnet18 = models.resnet18(pretrained=False)
         self.resnet18.fc = torch.nn.Identity()
         if(args.done_alpha!=0 or 'fed-admm' in args.project or 'fed-ns' in args.project):
             for p in self.resnet18.parameters():                # freeze resnet50
@@ -150,8 +149,13 @@ class Resnet18(torch.nn.Module):
             x (torch.Tensor): logits (not softmaxed yet).
             h (torch.Tensor): latent features (useful for tSNE plot and some FL algorithms).
         """
-
-        
+        if(x[0].flatten().shape[0]==784):
+            x=x.reshape(-1,1,28,28)
+            x=x.repeat(1,3,1,1)
+            x = F.pad(x,(18,18,18,18),mode='constant', value=0)
+        if(x[0].flatten().shape[0]==3072):
+            x=x.reshape(-1,3,32,32)
+            x = F.pad(x,(16,16,16,16),mode='constant', value=0)
         h = self.resnet18(x)
         x = self.logits(h)
         return x, h
@@ -171,8 +175,8 @@ class Resnet50(torch.nn.Module):
 
         super(Resnet50, self).__init__()
 
-        self.resnet50 = models.resnet50(pretrained=True)
-        self.resnet.fc = torch.nn.Identity()
+        self.resnet50 = models.resnet50(pretrained=False)
+        self.resnet50.fc = torch.nn.Identity()
         if(args.done_alpha!=0 or 'fed-admm' in args.project or 'fed-ns' in args.project):
             for p in self.resnet50.parameters():                # freeze resnet50
                 p.requires_grad = False
@@ -192,12 +196,13 @@ class Resnet50(torch.nn.Module):
             x (torch.Tensor): logits (not softmaxed yet).
             h (torch.Tensor): latent features (useful for tSNE plot and some FL algorithms).
         """    
-        if(x[0].shape==784):
+        if(x[0].flatten().shape[0]==784):
             x=x.reshape(-1,1,28,28)
+            x=x.repeat(1,3,1,1)
             x = F.pad(x,(18,18,18,18),mode='constant', value=0)
-        if(x[0].shape==3072):
-            x=x.reshape(-1,1,32,32)
-            x = F.pad(x = F.pad(x,(16,16,16,16),mode='constant', value=0))
+        if(x[0].flatten().shape[0]==3072):
+            x=x.reshape(-1,3,32,32)
+            x = F.pad(x,(16,16,16,16),mode='constant', value=0)
         h = self.resnet50(x)
         x = self.logits(h)
         return x, h
@@ -243,7 +248,6 @@ class Custom_Resnet(torch.nn.Module):
             for p in self.encoder.parameters():                # freeze resnet50
                 p.requires_grad = False
         self.logits = nn.Linear(2048, num_class)
-       
         self.optim = args.client_optim
         self.lr    = args.client_lr
         self.reuse_optim = args.reuse_optim
@@ -335,26 +339,28 @@ def custom_multi_margin_loss(x, y, margin=1.0):
 
         return loss
 
-def model_train_second_order(model: torch.nn.Module, y_k: torch.Tensor, data_loader: torch.utils.data.DataLoader, num_client_epoch: int,  col_opt: int, rho: float, alpha :float, lambda_i: int, sketch_m: int, model_type: str, sketch_mu: float, done_alpha: float, d_i_previous) -> None:
+def model_train_second_order(model: torch.nn.Module, y_k: torch.Tensor, data_loader: torch.utils.data.DataLoader, num_client_epoch: int,  col_opt: int, rho: float, alpha :float, lambda_i: float, sketch_m: int, model_type: str, sketch_mu: float, done_alpha: float, d_i_previous, l2_reg) -> None:
     
     model.train()
     optim = model.optim(model.parameters(), lr = model.lr, momentum=0.5)
     d_i_k=None
     hessian_sketch=None
-    params_shape=torch.cat([p.view(-1) for p in model.parameters()]).shape[0]
+    trainable_params = [p for p in model.parameters() if p.requires_grad]
+    params_shape=torch.cat([p.view(-1) for p in model.parameters() if p.requires_grad]).shape[0]
     # condition for fed-NS
     if(sketch_m!=0 and col_opt==0):
-        fed_ns_pre = NewtonSketch(model.parameters(), sketch_m, sketch_mu, device)
+        fed_ns_pre = NewtonSketch(trainable_params, sketch_m, sketch_mu, device)
         hessian_sketch = fed_ns_pre.compute_hessian_sketch(data_loader,model, model_type)
     # for stochastic update
     if col_opt!=0:
-        preconditioner = NYS_ADMM(model.parameters(),col_opt, lambda_i, y_k, alpha, rho, -1, device)
-        preconditioner.compute_hessian(data_loader, model, model_type)
+        preconditioner = NYS_ADMM(trainable_params,col_opt, lambda_i, l2_reg, y_k, alpha, rho, -1, device)
+        max_eigen,min_eigen = preconditioner.compute_hessian(data_loader, model, model_type)
+        print(f"Max eigen val: {max_eigen}, Min eigen val: {min_eigen}")
     if(alpha!=0 and col_opt==0):
-        preconditioner = ADMM(model.parameters(),lambda_i, y_k, alpha, rho, device)
+        preconditioner = ADMM(trainable_params,lambda_i, y_k, alpha, rho, device)
         preconditioner.compute_hessian(data_loader, model, model_type)
     if(done_alpha!=0 and col_opt==0):
-        preconditioner = DONE(model.parameters(), d_i_previous, done_alpha, device)
+        preconditioner = DONE(trainable_params, d_i_previous, done_alpha, device)
         d_i_k=preconditioner.compute_hessian(data_loader, model, model_type)
     for inputs, targets in data_loader:
         ## Picking a random batch
@@ -372,7 +378,8 @@ def model_train_second_order(model: torch.nn.Module, y_k: torch.Tensor, data_loa
         optim.zero_grad()
         loss.backward()
         ## For Second-Order gradient calculation
-        preconditioner.step()
+        if(sketch_m==0):
+         preconditioner.step()
         optim.step()
         
     if(device=='cuda'):
@@ -382,6 +389,8 @@ def model_train_second_order(model: torch.nn.Module, y_k: torch.Tensor, data_loa
             for process in processes:
                 if(model_type in process['full_command']):
                     memory_usage=float(process['gpu_memory_usage'])
+                else:
+                    continue
         except Exception as e:
             print(f"Error getting GPU info: {e}")
     else:
@@ -401,7 +410,7 @@ def model_train_second_order(model: torch.nn.Module, y_k: torch.Tensor, data_loa
         return d_i_k
     return
 
-def model_train_first_order(model: torch.nn.Module, data_loader: torch.utils.data.DataLoader, num_client_epoch: int) -> None:
+def model_train_first_order(model: torch.nn.Module, data_loader: torch.utils.data.DataLoader, num_client_epoch: int, args) -> None:
     """
     Train a model when FedProx is chosen for federated learning.
 
@@ -415,7 +424,7 @@ def model_train_first_order(model: torch.nn.Module, data_loader: torch.utils.dat
     process = psutil.Process()
     mem_info = process.memory_info()
     model.train()
-    optim = model.optim(model.parameters(), lr = model.lr, momentum=0.5)
+    optim = model.optim(model.parameters(), lr = model.lr, momentum=0.8)
 
     # load previous optimizer state
     if model.reuse_optim and model.optim_state is not None:
@@ -441,7 +450,7 @@ def model_train_first_order(model: torch.nn.Module, data_loader: torch.utils.dat
             gpus = gpustat.GPUStatCollection.new_query()
             processes = gpus[cuda_id].processes
             for process in processes:
-                if(process['full_command'][9]==model_type):
+                if(process['full_command'][3]==args.project):
                     memory_usage=float(process['gpu_memory_usage'])
                 else:
                     memory_usage=0.0
@@ -519,12 +528,6 @@ def model_train_MOON(model: torch.nn.Module, global_model: torch.nn.Module, data
     Returns:
         total_features (torch.Tensor): features extracted by client model in current global epoch.
     """
-
-    # for resnet18
-    # if isinstance(model, Resnet18_mnist):
-    #     resnet18_list[0].train()
-    # if isinstance(model, Resnet50_cifar10):
-    #     resnet50_list[0].train()
 
     model.train()
     optim = model.optim(model.parameters(), lr = model.lr)
@@ -604,12 +607,6 @@ def model_eval(model: torch.nn.Module,
 
     """
 
-    # for resnet18
-    # if isinstance(model, Resnet18_mnist):
-    #     resnet18_list[0].eval()
-    # if isinstance(model, Resnet50_cifar10):
-    #     resnet50_list[0].train()
-
     model.eval()
     epoch_labels   = []
     epoch_predicts = []
@@ -630,7 +627,7 @@ def model_eval(model: torch.nn.Module,
         return epoch_labels, epoch_predicts
     else:
         if(model_type=='SVM'):
-            loss = F.multi_margin_loss(epoch_predicts, epoch_labels)
+            loss = custom_multi_margin_loss(epoch_predicts, epoch_labels)
             wght=model.logits.weight.view(-1,1)
             loss+=(0.01 * torch.sum(wght**2)).to('cpu')
             

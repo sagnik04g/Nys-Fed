@@ -46,10 +46,11 @@ class ADMM(Optimizer):
             for batch_idx, (inputs, targets) in enumerate(gradloader):
                 inputs, targets = inputs.to(self.device), targets.to(self.device)
                 #optimizer.zero_grad()
-                outputs,_ = model(inputs)
+                with torch.backends.cudnn.flags(enabled=False):
+                    outputs,_ = model(inputs)
                 if(model_type == 'SVM'):
                     wght=model.logits.weight.view(-1,1)
-                    loss = torch.mean(self.custom_multi_margin_loss(outputs, targets)) + (0.1 * torch.sum(wght**2))        
+                    loss = torch.mean(self.custom_multi_margin_loss(outputs, targets)) + (0.01 * torch.sum(wght**2))        
                 else:
                     loss = F.cross_entropy(outputs, targets)
 
@@ -60,17 +61,21 @@ class ADMM(Optimizer):
                         self.H[j] += torch.cat([hi.reshape(-1).data for hi in torch.autograd.grad(g[j], group['params'], retain_graph=False)])
                     else:
                         self.H[j] += torch.cat([hi.reshape(-1).data for hi in torch.autograd.grad(g[j], group['params'], retain_graph=True)])
-            self.H = self.H/len(gradloader)
+        
+        self.H = self.H/len(gradloader)
+        torch.nan_to_num_(self.H, nan=1e-9, posinf=1e-9, neginf=1e-9)
+        self.H_alpha_rho = torch.linalg.pinv(self.H + (self.alpha+self.rho)*torch.eye(self.H.shape[0], self.H.shape[0]).to(self.device))
 
     def step(self):
-        H_alpha_rho = torch.linalg.pinv(self.H + (self.alpha+self.rho)*torch.eye(self.H.shape[0], self.H.shape[0]).to(self.device))
+        """Performs a single optimization step.
+        """
         for group in self.param_groups:
             g = torch.cat([p.grad.view(-1) for p in group['params']])
             w = self.y_k
             ls=0
             for p in group['params']:
                 torch.nan_to_num_(p.data, nan=1e-9, posinf=1e-9, neginf=1e-9)
-                yi_k = torch.mm(H_alpha_rho , (g.view(-1,1) - self.lambda_i + self.rho * w.view(-1,1)))
+                yi_k = torch.mm(self.H_alpha_rho , (g.view(-1,1) - self.lambda_i + self.rho * w.view(-1,1)))
                 # self.yi_k=yi_k
                 vp=yi_k[ls:ls+torch.numel(p)].view(p.shape)
                 ls += torch.numel(p)

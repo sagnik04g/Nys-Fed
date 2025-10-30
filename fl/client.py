@@ -35,7 +35,7 @@ class Client(object):
         self.dataset = Dataset(client_data_dict['x'], client_data_dict['y'])
         self.data_loader = torch.utils.data.DataLoader(self.dataset, batch_size = self.client_bs, shuffle = not self.MOON)
             
-    def local_train_first_order(self, client_model: torch.nn.Module, global_model: torch.nn.Module, args) -> list | torch.Tensor:
+    def local_train_first_order(self, client_model: torch.nn.Module, global_model: torch.nn.Module, args, previous_feature) -> list | torch.Tensor:
         """
         Client local training.
 
@@ -50,43 +50,49 @@ class Client(object):
 
         client_model.to(device)
 
-        # client_features = []
-        # if self.MOON:
-        #     for current_client_epoch in range(self.client_epoch):
-        #         # client model train
-        #         if (previous_feature != None) and (client_features == []):
-        #             client_features_tensor = previous_feature
-        #         elif (previous_feature == None) and (client_features == []):
-        #             client_features_tensor = None
-        #         elif client_features != []:
-        #             client_features_tensor = torch.zeros((len(client_features), client_features[0].shape[0], client_features[0].shape[1]))
-        #             for idx, prev in enumerate(client_features):
-        #                 client_features_tensor[idx] = copy.deepcopy(prev.detach())
-        #             client_features_tensor = client_features_tensor.cuda()
+        client_features = []
+        if self.MOON:
+            for current_client_epoch in range(self.client_epoch):
+                # client model train
+                if (previous_feature != None) and (client_features == []):
+                    client_features_tensor = previous_feature
+                elif (previous_feature == None) and (client_features == []):
+                    client_features_tensor = None
+                elif client_features != []:
+                    client_features_tensor = torch.zeros((len(client_features), client_features[0].shape[0], client_features[0].shape[1]))
+                    for idx, prev in enumerate(client_features):
+                        client_features_tensor[idx] = copy.deepcopy(prev.detach())
+                    client_features_tensor = client_features_tensor.cuda()
                     
-        #         client_feat = model_train_MOON(client_model, global_model, self.data_loader, client_features_tensor)
-        #         client_features.append(client_feat)
+                client_feat = model_train_MOON(client_model, global_model, self.data_loader, client_features_tensor)
+                client_features.append(client_feat)
 
-        # if self.FedProx:
-        #     model_train_FedProx(client_model, global_model, self.data_loader, self.client_epoch)
+        if self.FedProx:
+            model_train_FedProx(client_model, global_model, self.data_loader, self.client_epoch)
             
         #     return None
-        # else:
-        model_train_first_order(client_model, self.data_loader, self.client_epoch)
+        else:
+            model_train_first_order(client_model, self.data_loader, self.client_epoch, args)
      
         client_model.to('cpu')
+        last_client_features = []
+        if self.MOON:
+            last_client_features = client_features[-1]
+        
+        return last_client_features
         
     
-    def local_train_second_order(self, client_model: torch.nn.Module, y_k: torch.Tensor, lambda_i:int, args):
+    def local_train_second_order(self, client_model: torch.nn.Module, y_k: torch.Tensor, lambda_i:float, args):
 
-        col_opt, rho, alpha, sketch_m, model_type, sketch_mu, done_alpha = args.col_opt, args.rho, args.alpha, args.sketch_m, args.model, args.sketch_mu, args.done_alpha
+        col_opt, rho, alpha, sketch_m, model_type, sketch_mu, done_alpha, l2_reg = args.col_opt, args.rho, args.alpha, args.sketch_m, args.model, args.sketch_mu, args.done_alpha, args.l2_reg
         # if(args.fed_agg=='FedNew'):
         client_model.to(device)
-        d_i_previous=torch.zeros_like(torch.cat([p.view(-1) for p in client_model.parameters()]))
+        d_i_previous = torch.zeros_like(torch.cat([p.view(-1) for p in client_model.parameters() if p.requires_grad]))
         for current_client_epoch in range(self.client_epoch):
-            vector_matrix = model_train_second_order(client_model, y_k, self.data_loader, self.client_epoch, col_opt, rho, alpha, lambda_i, sketch_m , model_type, sketch_mu, done_alpha, d_i_previous)
+            vector_matrix = model_train_second_order(client_model, y_k, self.data_loader, self.client_epoch, col_opt, rho, alpha, lambda_i, sketch_m , model_type, sketch_mu, done_alpha, d_i_previous, l2_reg)
             if(done_alpha!=0):
                 d_i_previous=vector_matrix
+                del vector_matrix
         if(sketch_m!=0 and sketch_mu!=0):
             return vector_matrix
         

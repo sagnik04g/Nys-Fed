@@ -18,6 +18,7 @@ class NewtonSketch(Optimizer):
         self.m=int(m_sketch)
         param_grps_list=list(self.param_groups)
         self.h_dim=torch.cat([pi.view(-1) for pi in param_grps_list[0]['params']])
+        print(self.h_dim.shape)
         self.device=device
         self.H = torch.zeros(self.h_dim.shape[0], self.h_dim.shape[0]).to(self.device)
         self.mu = sketch_mu
@@ -47,10 +48,11 @@ class NewtonSketch(Optimizer):
             # inputs, targets = gradloader.dataset[:]
                 inputs, targets = inputs.to(self.device), targets.to(self.device)
                 #optimizer.zero_grad()
-                outputs,_ = model(inputs)
+                with torch.backends.cudnn.flags(enabled=False):
+                    outputs,_ = model(inputs)
                 if(model_type == 'SVM'):
                     wght=model.logits.weight.view(-1,1)
-                    loss = torch.mean(self.custom_multi_margin_loss(outputs, targets)) + (0.1 * torch.sum(wght**2))
+                    loss = torch.mean(self.custom_multi_margin_loss(outputs, targets)) + (0.01 * torch.sum(wght**2))
                 else:
                     loss = F.cross_entropy(outputs, targets)
                     

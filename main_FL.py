@@ -41,11 +41,11 @@ if __name__ == '__main__':
     
     # wandb run name
     args.name  = 'seed ' + str(args.seed) + ' '
-    args.name += args.switch_FL + ': C ' + str(args.client_C) + ', E ' + str(args.client_epoch) + ', '
+    args.name += args.switch_FL + ': C ' + str(args.client_C) + ', E ' + str(args.client_epoch) + ', ' + 'Nys ' + str(args.col_opt) + ' Sketch ' + str(args.sketch_m) + ','
     
     match args.switch_FL:
 
-        case 'FedAgg' | 'FedNew' | 'FedNS' | 'FedProx' | 'MOON':
+        case 'FedAvg' | 'FedNew' | 'FedNS' | 'FedProx' | 'MOON':
             args.name += str(args.client_optim).split('.')[-1][:-2] + ' ' + str(args.client_lr)
         case 'FedAdam' | 'FedAMS':
             args.name += str(args.global_optim).split('.')[-1][:-2] + ' ' + str(args.global_lr)

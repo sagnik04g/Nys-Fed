@@ -48,7 +48,7 @@ class DONE(Optimizer):
                     outputs, _ = model(inputs)
                 if(model_type == 'SVM'):
                     wght=model.logits.weight.view(-1,1)
-                    loss = torch.mean(self.custom_multi_margin_loss(outputs, targets)) + (0.1 * torch.sum(wght**2))        
+                    loss = torch.mean(self.custom_multi_margin_loss(outputs, targets)) + (0.01 * torch.sum(wght**2))        
                 else:
                     loss = F.cross_entropy(outputs, targets)
                 g = torch.autograd.grad(loss, group['params'], create_graph=True, retain_graph=True)
@@ -59,12 +59,14 @@ class DONE(Optimizer):
                     else:
                         self.H[j] += torch.cat([hi.reshape(-1).data for hi in torch.autograd.grad(g[j], group['params'], retain_graph=True)])
             self.H=self.H/len(gradloader)
-            max_alpha = 2/torch.max(torch.linalg.eigvalsh(self.H))
+            #max_alpha = 2/torch.max(torch.linalg.eigvalsh(self.H))
             #print(max_alpha)
-            if(max_alpha < self.alpha):
-                self.alpha = max_alpha - 0.5 
+            #if(max_alpha < self.alpha):
+            #    self.alpha = max_alpha - 0.5 
             self.H_alpha = (torch.eye(*self.H.shape).to(self.device)-self.alpha*self.H).to(self.device)
             self.d_i_k = torch.mm(self.H_alpha , self.d_i_previous.view(-1,1)) - self.alpha*g.view(-1,1)
+            del self.H
+            del self.d_i_previous
             return self.d_i_k
 
     def step(self):

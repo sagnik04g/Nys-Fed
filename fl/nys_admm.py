@@ -5,16 +5,18 @@ from torch.optim.optimizer import Optimizer
 import numpy as np
 import gc
 required=True
-
+global lambda_min,lambda_max
+lambda_min, lambda_max = 999, -999
 class NYS_ADMM(Optimizer):
 
-    def __init__(self, params, col_opt=required, lambda_i=required, y_k=required, alpha=required,rho=required, col=-1, device=required):
+    def __init__(self, params, col_opt=required, lambda_i=required, l2_reg=required, y_k=required, alpha=required,rho=required, col=-1, device=required):
         
         defaults = dict(col=col,rho=rho,alpha=alpha)
         super(NYS_ADMM, self).__init__(params, defaults)
         self.y_k=y_k
         self.alpha=alpha
-        self.lambda_i = lambda_i
+        self.lambda_i=lambda_i
+        self.l2_reg = l2_reg
         self.rho = rho
         self.col_opt=col_opt
         param_grps_list=list(self.param_groups)
@@ -25,7 +27,7 @@ class NYS_ADMM(Optimizer):
         self.device=device 
         self.h = torch.zeros(col, h_dim.shape[0]).to(device)
         self.idx = torch.randperm(h_dim.shape[0])[:col]
-        self.col=col
+        self.col = col
 
     def __setstate__(self, state):
         super(NYS_ADMM, self).__setstate__(state)
@@ -53,7 +55,7 @@ class NYS_ADMM(Optimizer):
                     outputs, _ = model(inputs)
                 if(model_type == 'SVM'):
                     weights = model.logits.weight.view(-1,1).squeeze()
-                    loss = torch.mean(self.custom_multi_margin_loss(outputs,targets) + (0.1 * torch.sum(weights**2))).to(self.device)
+                    loss = torch.mean(self.custom_multi_margin_loss(outputs,targets) + (0.01 * torch.sum(weights**2))).to(self.device)
                     # loss = torch.mean(torch.relu(1-(outputs*y.reshape(-1,1))**2)) + (0.5 * torch.sum(weights**2))
                 else:
                     loss = F.cross_entropy(outputs, targets)
@@ -67,11 +69,12 @@ class NYS_ADMM(Optimizer):
             
             self.h=self.h/len(gradloader)
             M = self.h[:,self.idx].to(self.device)
-            M_eigenvals=torch.linalg.eigvalsh(M)
+            M_eigenvals=torch.linalg.eigvalsh(M*torch.eye(M.shape[0]).to(self.device) * self.l2_reg)
             min_eigen=torch.min(M_eigenvals)
             torch.nan_to_num_(g.data, nan=1e-5, posinf=1e-5, neginf=1e-5)
             norm_g = torch.Tensor.norm(g)
-            self.irho = 1/max(torch.sqrt(norm_g).item(),1)
+            alpharho = self.alpha+self.rho+max(torch.sqrt(norm_g).item(),1e-5)
+            self.irho = 1/alpharho
             if min_eigen.item() == 0 or min_eigen.item() <= 1e-5:
                 c_t = 1/(self.irho**0.5)
             else:
@@ -80,7 +83,8 @@ class NYS_ADMM(Optimizer):
             M = M + (2*max(-min_eigen.item(),0)+ c_t)*torch.eye(M.shape[0]).to(self.device)
             M_ev=torch.linalg.eigvalsh(M)
             min_eig=torch.min(M_ev)
-            print('min. eigen value: '+str(min_eig))
+            max_eig=torch.max(M_ev)
+            # print('min. eigen value: '+str(min_eig))
             print('Norm g: '+str(norm_g),'irho='+str(self.irho))
             rnk = torch.linalg.matrix_rank(M)
             U, S, V = torch.svd(M)
@@ -89,9 +93,10 @@ class NYS_ADMM(Optimizer):
             S = torch.sqrt(torch.diag(1./S[ix]))
             print('S: '+str(S.shape))
             self.Z = torch.mm(self.h.t(), torch.mm(U, S))
-            self.Q = self.irho**2 * torch.mm(self.Z, torch.inverse((self.rho+self.alpha)*torch.eye(rnk).to(self.device) + self.irho * torch.mm(self.Z.t(), self.Z)))
+            self.Q = self.irho**2 * torch.mm(self.Z, torch.inverse(self.rho*torch.eye(rnk).to(self.device) + self.irho * torch.mm(self.Z.t(), self.Z)))
             del M
             torch.cuda.empty_cache()
+            return max_eig, min_eig
 
 
     def step(self):
@@ -100,7 +105,10 @@ class NYS_ADMM(Optimizer):
         ls=0
         for group in self.param_groups:
             g = torch.cat([p.grad.view(-1) for p in group['params']])
-            v_new = self.irho*g.view(-1,1)-torch.mm(self.Q, torch.mm(self.Z.t(), g.view(-1,1)))
+            w = self.y_k
+            scaled_grad = torch.mm(self.Z.t() , (g.view(-1,1) - self.lambda_i + self.rho * w.view(-1,1))) 
+            v_new = self.irho*(g.view(-1,1) - self.lambda_i + self.rho * w.view(-1,1))-torch.mm(self.Q, scaled_grad)
+            #v_new = self.irho*g.view(-1,1)-torch.mm(self.Q, torch.mm(self.Z.t(), g.view(-1,1)))
             for p in group['params']:
                 vp=v_new[ls:ls+torch.numel(p)].view(p.shape)
                 ls += torch.numel(p)
