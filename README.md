@@ -1,5 +1,5 @@
 # Nys-Fed
-A comprehensive study in Federated Learning to compare the Nyström Approximation with other Newton's method like FedNew, FedNS and DONE, along with firt-order FL methods like FedAvg, FedProx and MOON. Our source code is implemented in PyTorch. The experiments are inspired by FedNew and FedNS, which we reimplemented in PyTorch from their original MATLAB versions.
+A comprehensive study in Federated Learning to compare the Nyström Approximation with other Newton's method like FedNew, FedNS and DONE, along with first-order FL methods like FedAvg, FedProx and MOON. Our source code is implemented in PyTorch. The experiments are inspired by FedNew and FedNS, which we reimplemented in PyTorch from their original MATLAB versions.
 
 ## Prerequisites
 1. Download the femnist and shakespeare dataset from LEAF
