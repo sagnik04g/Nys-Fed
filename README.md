@@ -19,19 +19,19 @@ conda activate nysfed
 ```bash
 bash experiments1.sh
 ```
-3. Run the pytorch implementation of [FedNew](https://github.com/aelgabli/FedNew) and [FedNS](https://github.com/superlj666/FedNS) on w8a and phishing datasets
+2. Run the pytorch implementation of [FedNew](https://github.com/aelgabli/FedNew) and [FedNS](https://github.com/superlj666/FedNS) on w8a and phishing datasets
 ```bash
 bash experiments2.sh
 ```
-5. Run other experiments for comparison of Nys-Fed on w8a, phishing and realsim datasets as well as the shakespeare dataset
+3. Run other experiments for comparison of Nys-Fed on w8a, phishing and realsim datasets as well as the shakespeare dataset
 ```bash
 bash experiments3.sh
 ```
-7. Run experiments with first-order FL methods on all datasets including femnist, cinic10, shakespeare, w8a, phishing and realsim.
+4. Run experiments with first-order FL methods on all datasets including femnist, cinic10, shakespeare, w8a, phishing and realsim.
 ```bash
 bash experiments4.sh
 ```
-9. Run experiments for comparing DONE method with Richardson's Iterations on w8a and phishing dataset.
+5. Run experiments for comparing DONE method with Richardson's Iterations on w8a and phishing dataset.
 ```bash
 bash experiments5.sh
 ```
