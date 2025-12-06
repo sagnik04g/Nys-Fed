@@ -5,6 +5,7 @@ A comprehensive study in Federated Learning to compare the Nyström Approximatio
 1. Download the femnist and shakespeare dataset from LEAF
 2. Download the cinic10 dataset from "https://www.kaggle.com/datasets/mengcius/cinic10"
 3. Download the libsvm datasets "phishing, w8a and realsim" from "https://www.csie.ntu.edu.tw/~cjlin/libsvmtools/datasets/"
+4. Prepare the federated datasets for cinic10, phishing, w8a and realsim by running python files in datasets_build folder.
 
 ## Setup and Installation
 Create a conda env and install the required libraries
